@@ -8,6 +8,9 @@
 #include <ctime>
 #include <algorithm>
 #include <fcntl.h>
+#include <iomanip>
+#include <sstream>
+#include <chrono>
 
 class Player {
 public:
@@ -17,6 +20,7 @@ public:
     int colorPair;
     bool hasMoved = false;
     std::string lastDirection;
+    bool eliminated = false;
 
     Player(const std::string& username, char character, int x, int y, int colorPair) :
             username(username), character(character), x(x), y(y), colorPair(colorPair) {}
@@ -60,6 +64,15 @@ public:
     }
 };
 
+std::string getCurrentTimestamp() {
+    auto now = std::chrono::system_clock::now();
+    auto in_time_t = std::chrono::system_clock::to_time_t(now);
+
+    std::stringstream ss;
+    ss << std::put_time(std::localtime(&in_time_t), "%Y-%m-%d %X"); // Format: YYYY-MM-DD HH:mm:ss
+    return ss.str();
+}
+
 bool isUsernameOrCharacterTaken(const std::string& username, char character, const std::vector<Player*>& players) {
     for (const auto& player : players) {
         if (player->username == username || player->character == character) {
@@ -82,13 +95,19 @@ std::string createPlayerList(const std::vector<Player*>& players) {
 }
 
 void logConnection(const std::string& username, char character) {
-    std::time_t now = std::time(0);
-    std::tm* ltm = std::localtime(&now);
-    std::cout << "[" << 1 + ltm->tm_hour << ":" << 1 + ltm->tm_min << ":" << 1 + ltm->tm_sec
-              << "] New connection: Username = " << username << ", Character = " << character << std::endl;
+    std::cout << "[" << getCurrentTimestamp() << "] New connection: Username = " << username << ", Character = " << character << std::endl;
 }
 
-void updatePlayerPosition(Player* player, const std::string& command) {
+bool isPositionOccupied(int x, int y, const std::vector<Player*>& players) {
+    for (const auto& player : players) {
+        if (!player->eliminated && player->x == x && player->y == y) {
+            return true;
+        }
+    }
+    return false;
+}
+
+void updatePlayerPosition(Player* player, const std::string& command, const std::vector<Player*>& players) {
     if (command.empty()) return;
 
     char direction = command[0];
@@ -96,12 +115,12 @@ void updatePlayerPosition(Player* player, const std::string& command) {
     int newX = player->x, newY = player->y;
 
     if (direction == 'U') newY -= 1;
-    if (direction == 'D') newY += 1;
-    if (direction == 'L') newX -= 1;
-    if (direction == 'R') newX += 1;
+    else if (direction == 'D') newY += 1;
+    else if (direction == 'L') newX -= 1;
+    else if (direction == 'R') newX += 1;
 
     // Boundary checks
-    if (newX > 1 && newX < 24 && newY > 1 && newY < 10) {
+    if (newX > 1 && newX < 24 && newY > 1 && newY < 10 && !isPositionOccupied(newX, newY, players)) {
         player->x = newX;
         player->y = newY;
     }
@@ -133,6 +152,39 @@ std::string createMoveStatus(const std::vector<Player*>& players) {
     return status;
 }
 
+bool isAttackCommand(const std::string& command) {
+    // Check if the command is one of the attack commands
+    std::string attackCommands = "ETFYFHCGBCetfyfhcgbc";
+    return attackCommands.find(command) != std::string::npos;
+}
+
+void processAttackCommand(Player* attacker, const std::vector<Player*>& players, const std::string& command, const std::unordered_map<int, Player*>& socketToPlayerMap) {
+    std::cout << "[" << getCurrentTimestamp() << "] Attack command received from " << attacker->username << ": " << command << std::endl;
+    int attackX = attacker->x, attackY = attacker->y;
+
+    if (command == "e" || command == "E") { attackX--; attackY--; } // Attack top left
+    else if (command == "t" || command == "T") { attackY--; } // Attack top
+    else if (command == "y" || command == "Y") { attackX++; attackY--; } // Attack top right
+    else if (command == "f" || command == "F") { attackX--; } // Attack left
+    else if (command == "h" || command == "H") { attackX++; } // Attack right
+    else if (command == "c" || command == "C") { attackX--; attackY++; } // Attack bottom left
+    else if (command == "g" || command == "G") { attackY++; } // Attack bottom
+    else if (command == "b" || command == "B") { attackX++; attackY++; } // Attack bottom right
+
+    for (auto& target : players) {
+        if (target != attacker && !target->eliminated && target->x == attackX && target->y == attackY) {
+            target->eliminated = true; // Eliminate the target
+            std::cout << "[" << getCurrentTimestamp() << "] Player " << target->username << " eliminated by " << attacker->username << std::endl;
+            // Send update to all clients about the elimination
+            std::string eliminationUpdate = "E" + std::string(1, target->character) + "|";
+            for (const auto& pair : socketToPlayerMap) {
+                send(pair.first, eliminationUpdate.c_str(), eliminationUpdate.length(), 0);
+            }
+            break; // Only eliminate one player per attack
+        }
+    }
+}
+
 std::string generateMoveStatus(const std::vector<Player*>& players) {
     std::string moveStatus;
     for (const auto& player : players) {
@@ -144,24 +196,22 @@ std::string generateMoveStatus(const std::vector<Player*>& players) {
 std::string generatePositions(const std::vector<Player*>& players) {
     std::string positions;
     for (const auto& player : players) {
-        positions += std::to_string(player->x) + "," + std::to_string(player->y)
-                     + "," + player->character + "," + std::to_string(player->colorPair) + ";";
+        if (player->eliminated) {
+            positions += player->character + std::string("X;"); // Indicate elimination
+        } else {
+            positions += std::to_string(player->x) + "," + std::to_string(player->y)
+                         + "," + player->character + "," + std::to_string(player->colorPair) + ";";
+        }
     }
     return positions;
 }
 
 void logDirectionReceived(const std::string& username, const std::string& direction) {
-    std::time_t now = std::time(0);
-    std::tm* ltm = std::localtime(&now);
-    std::cout << "[" << 1 + ltm->tm_hour << ":" << 1 + ltm->tm_min << ":" << 1 + ltm->tm_sec
-              << "] Direction received: Username = " << username << ", Direction = " << direction << std::endl;
+    std::cout << "[" << getCurrentTimestamp() << "] Direction received: Username = " << username << ", Direction = " << direction << std::endl;
 }
 
 void logPositionUpdate(const std::string& positions) {
-    std::time_t now = std::time(0);
-    std::tm* ltm = std::localtime(&now);
-    std::cout << "[" << 1 + ltm->tm_hour << ":" << 1 + ltm->tm_min << ":" << 1 + ltm->tm_sec
-              << "] Position update: " << positions << std::endl;
+    std::cout << "[" << getCurrentTimestamp() << "] Position update: " << positions << std::endl;
 }
 
 int main() {
@@ -221,7 +271,6 @@ int main() {
     }
 
     // Inside the server main loop
-    // Inside the server main loop
     while (true) {
         bool allDirectionsReceived = true;
 
@@ -229,20 +278,39 @@ int main() {
             int socket = pair.first;
             Player* player = pair.second;
 
-            if (!receivedDirections[socket]) {
-                std::string moveCommand = receiveData(socket);
-                if (!moveCommand.empty()) {
-                    // Update player direction and log it
-                    player->lastDirection = moveCommand;
-                    logDirectionReceived(player->username, moveCommand);
+            if (!receivedDirections[socket] && !player->eliminated) {
+                std::string command = receiveData(socket);
+                if (command == "VLPDR_DRTBRT"){
+                    std::cout << "[" << getCurrentTimestamp() << "] Server shutdown initiated." << std::endl;
+                    // Close all client sockets
+                    for (const auto& pair : socketToPlayerMap) {
+                        close(pair.first);
+                    }
 
-                    receivedDirections[socket] = true;
-                    player->hasMoved = true;
+                    // Release all dynamically allocated Player objects
+                    for (Player* player : players) {
+                        delete player;
+                    }
 
-                    // Update player position based on direction
-                    updatePlayerPosition(player, moveCommand);
+                    // Log completion of cleanup
+                    std::cout << "[" << getCurrentTimestamp() << "] Server resources cleaned up. Shutting down." << std::endl;
 
-                    // Send 'L' command for this player to all clients
+                    return 0;
+                }
+                if (!command.empty()) {
+                    if (isAttackCommand(command)) {
+                        processAttackCommand(player, players, command, socketToPlayerMap);
+                        receivedDirections[socket] = true;
+                    } else {
+                        // Update player direction and log it
+                        player->lastDirection = command;
+                        logDirectionReceived(player->username, command);
+                        receivedDirections[socket] = true;
+                        player->hasMoved = true;
+                        updatePlayerPosition(player, command, players);
+                    }
+
+                    // Update list status
                     std::string listUpdate = "L" + std::string(1, player->character) + "|";
                     for (const auto &innerPair: socketToPlayerMap) {
                         send(innerPair.first, listUpdate.c_str(), listUpdate.length(), 0);
@@ -260,7 +328,7 @@ int main() {
 
             // Log the position update
             logPositionUpdate(positions);
-            std::cout << "Sending position update to clients: " << resetAndPositionsCommand << std::endl;
+            std::cout << "[" << getCurrentTimestamp() << "] Sending position update to clients: " << resetAndPositionsCommand << std::endl;
 
             // Send reset and positions command to all clients
             for (const auto& pair : socketToPlayerMap) {

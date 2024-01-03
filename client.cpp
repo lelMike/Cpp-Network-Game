@@ -13,6 +13,7 @@
 #include <map>
 #include <sstream>
 #include <atomic>
+#include <chrono>
 
 bool startsWith(const std::string& fullString, const std::string& starting) {
     if (fullString.length() >= starting.length()) {
@@ -24,14 +25,41 @@ bool startsWith(const std::string& fullString, const std::string& starting) {
 
 class UserInterface {
 public:
+    void printInstructions(){
+        initscr();            // Initialize the window
+        clear();              // Clear the screen
+        curs_set(0);          // Hide the cursor
+        // ASCII Art Title "Arena Game"
+        printw(" _______  ______    _______  __    _  _______    _______  _______  __   __  _______ \n");
+        printw("|   _   ||    _ |  |       ||  |  | ||   _   |  |       ||   _   ||  |_|  ||       |\n");
+        printw("|  |_|  ||   | ||  |    ___||   |_| ||  |_|  |  |    ___||  |_|  ||       ||    ___|\n");
+        printw("|       ||   |_||_ |   |___ |       ||       |  |   | __ |       ||       ||   |___ \n");
+        printw("|       ||    __  ||    ___||  _    ||       |  |   ||  ||       ||       ||    ___|\n");
+        printw("|   _   ||   |  | ||   |___ | | |   ||   _   |  |   |_| ||   _   || ||_|| ||   |___ \n");
+        printw("|__| |__||___|  |_||_______||_|  |__||__| |__|  |_______||__| |__||_|   |_||_______|\n\n");
+
+        // Instructions
+        printw("Welcome to the Arena Game!\n");
+        printw("Instructions:\n");
+        printw("1. Four players spawn in each corner of the arena.\n");
+        printw("2. Eliminate others by attacking them, last player standing wins.\n");
+        printw("3. Attack or move one tile each turn. Moves are shown after the turn.\n");
+        printw("4. Moving strategically can help avoid attacks.\n\n");
+        refresh();
+        clear();
+        endwin();
+    }
+
     void startUpScreen(std::string& port, std::string& username, std::string& character) {
+        printInstructions();
         initscr();            // Initialize the window
         cbreak();             // Disable line buffering
         echo();               // Echo keypresses to the window
         curs_set(1);          // Show the cursor
-        start_color();        // Start color functionality
-        init_pair(1, COLOR_CYAN, COLOR_BLACK);
-        init_pair(2, COLOR_RED, COLOR_BLACK);
+        start_color();
+        init_pair(1, COLOR_GREEN, COLOR_BLACK); // Green for moved
+        init_pair(2, COLOR_YELLOW, COLOR_BLACK); // Yellow for not moved/reset list
+        init_pair(3, COLOR_RED, COLOR_BLACK);   // Red for eliminated
 
         int height = 12;
         int width = 50;
@@ -184,8 +212,9 @@ private:
     std::thread updateThread;
     std::thread moveStatusThread;
     std::thread serverCommandThread;
-    std::vector<std::tuple<std::string, char, bool>> playerMoveStatus;
+    std::vector<std::tuple<std::string, char, bool, bool>> playerMoveStatus;
     std::map<char, std::tuple<int, int, int>> playerPositions; // Global or within GameClient class
+    std::atomic<bool> isGameRunning;
 
     // Helper function to check if a string is an integer
     bool isInteger(const std::string& s) {
@@ -200,13 +229,45 @@ private:
             clrtoeol();
         }
         mvprintw(line++, 0, "Player move list:");
-        for (const auto& [username, character, hasMoved] : playerMoveStatus) {
-            attron(COLOR_PAIR(hasMoved ? 2 : 1)); // Green if moved, red otherwise
-            mvprintw(line++, 0, "%s (%c)", username.c_str(), character);
-            attroff(COLOR_PAIR(hasMoved ? 2 : 1));
+        for (const auto& [username, character, hasMoved, isEliminated] : playerMoveStatus) {
+            if (isEliminated) {
+                attron(COLOR_PAIR(1)); // Red for eliminated
+                mvprintw(line++, 0, "%s (%c) [ELIMINATED]", username.c_str(), character);
+                attroff(COLOR_PAIR(3));
+            } else if (hasMoved) {
+                attron(COLOR_PAIR(2)); // Green if moved
+                mvprintw(line++, 0, "%s (%c)", username.c_str(), character);
+                attroff(COLOR_PAIR(1));
+            } else {
+                attron(COLOR_PAIR(4)); // Yellow for not moved
+                mvprintw(line++, 0, "%s (%c)", username.c_str(), character);
+                attroff(COLOR_PAIR(2));
+            }
         }
         refresh(); // Force refresh
     }
+
+    void drawKeyMappingsBox() {
+        int mappingHeight = 7; // Height of the mapping box
+        int mappingWidth = 50; // Width of the mapping box
+        int mappingStartY = LINES - mappingHeight - 1; // Position near the bottom
+        int mappingStartX = 2; // A little padding from the left edge
+
+        WINDOW* mappingWin = newwin(mappingHeight, mappingWidth, mappingStartY, mappingStartX);
+        box(mappingWin, 0, 0); // Draw a box around the window
+
+        // Use cyan color for the key mappings
+        wattron(mappingWin, COLOR_PAIR(5));
+        mvwprintw(mappingWin, 1, 2, "Attack keys:      |       Movement keys:");
+        mvwprintw(mappingWin, 3, 2, " E T Y            |       Up, down, left, right arrow keys");
+        mvwprintw(mappingWin, 4, 2, " F   H            |       ");
+        mvwprintw(mappingWin, 5, 2, " C G B            |       ");
+        wattroff(mappingWin, COLOR_PAIR(5));
+
+        wrefresh(mappingWin); // Refresh the window to show the box and text
+        delwin(mappingWin); // Delete the window to avoid memory leaks
+    }
+
 
     void processMoveStatus(const std::string& moveStatus) {
         std::istringstream moveStream(moveStatus.substr(11)); // Skip "MoveStatus:" prefix
@@ -222,7 +283,7 @@ private:
             std::getline(infoStream, hasMovedStr, ',');
 
             bool hasMoved = hasMovedStr == "1";
-            playerMoveStatus.push_back(std::make_tuple(username, charStr[0], hasMoved));
+            playerMoveStatus.push_back(std::make_tuple(username, charStr[0], hasMoved, false));
         }
         displayMoveStatus();
     }
@@ -262,6 +323,25 @@ private:
         refresh();
     }
 
+    void displayVictoryScreen(const std::string& winner) {
+        clientNetwork.sendData("VLPDR_DRTBRT"); // Send server shutdown command
+        clear();
+        start_color();
+        init_pair(6, COLOR_MAGENTA, COLOR_BLACK); // Color for victory message
+
+        attron(COLOR_PAIR(6));
+        mvprintw(LINES / 2, (COLS - winner.size() - 17) / 2, "Victory! Winner: %s", winner.c_str());
+        mvprintw(LINES / 2 + 1, (COLS - 30) / 2, "Press any key to exit...");
+        attroff(COLOR_PAIR(6));
+
+        refresh();
+        getch(); // Wait for user input to continue
+        clear();
+        endwin(); // End ncurses window
+
+        isGameRunning = false;
+    }
+
     void drawArenaAndPlayers() {
         clear();
 
@@ -278,6 +358,32 @@ private:
         init_pair(2, COLOR_GREEN, COLOR_BLACK);
         init_pair(3, COLOR_BLUE, COLOR_BLACK);
         init_pair(4, COLOR_YELLOW, COLOR_BLACK);
+        init_pair(5, COLOR_CYAN, COLOR_BLACK); // For key mappings
+
+        // Display key mappings near the bottom left corner
+        int mappingHeight = 8; // Adjusted height of the mapping box
+        int mappingWidth = 55; // Width of the mapping box
+        int mappingStartY = LINES - mappingHeight - 2; // Adjusted position near the bottom
+        int mappingStartX = 1; // A little padding from the left edge
+
+        // Draw the top horizontal line, one character longer to the left
+        mvhline(mappingStartY - 1, mappingStartX, ACS_HLINE, mappingWidth + 1); // Horizontal line
+
+        // Draw a vertical line replacing '|' in the key mappings, extending from the top horizontal line
+        mvvline(mappingStartY, mappingStartX + 17, ACS_VLINE, mappingHeight); // Vertical line
+
+        // Draw a vertical line on the right, 1 longer on the bottom, and 2 shorter on the top
+        mvvline(mappingStartY - 1, mappingStartX + mappingWidth, ACS_VLINE, mappingHeight + 2); // Vertical line down
+
+        // Use cyan color for the key mappings
+        attron(COLOR_PAIR(5));
+        mvprintw(mappingStartY + 1, mappingStartX, "Attack keys:      ");
+        mvprintw(mappingStartY + 1, mappingStartX + 21, "Movement keys:");
+        mvprintw(mappingStartY + 3, mappingStartX, " E T Y            ");
+        mvprintw(mappingStartY + 3, mappingStartX + 21, "Up, down, left, right arrow keys");
+        mvprintw(mappingStartY + 5, mappingStartX, " F   H            ");
+        mvprintw(mappingStartY + 6, mappingStartX, " C G B            ");
+        attroff(COLOR_PAIR(5));
 
         // Draw the arena
         const int arenaHeight = 10;
@@ -313,6 +419,7 @@ private:
             attroff(COLOR_PAIR(colorPair));
         }
 
+        drawKeyMappingsBox();
         refresh();
     }
 
@@ -334,12 +441,20 @@ private:
     void handleMovement(int ch) {
         if (waitingForServerResponse) return; // Don't handle new input
 
-        std::string direction;
+        std::string command;
         switch (ch) {
-            case KEY_UP:    direction = "UP"; break;
-            case KEY_DOWN:  direction = "DOWN"; break;
-            case KEY_LEFT:  direction = "LEFT"; break;
-            case KEY_RIGHT: direction = "RIGHT"; break;
+            case KEY_UP:    command = "UP"; break;
+            case KEY_DOWN:  command = "DOWN"; break;
+            case KEY_LEFT:  command = "LEFT"; break;
+            case KEY_RIGHT: command = "RIGHT"; break;
+            case 'e': case 'E': command = "E"; break; // Attack top left
+            case 't': case 'T': command = "T"; break; // Attack top
+            case 'y': case 'Y': command = "Y"; break; // Attack top right
+            case 'f': case 'F': command = "F"; break; // Attack left
+            case 'h': case 'H': command = "H"; break; // Attack right
+            case 'c': case 'C': command = "C"; break; // Attack bottom left
+            case 'g': case 'G': command = "G"; break; // Attack bottom
+            case 'b': case 'B': command = "B"; break; // Attack bottom right
             case '\n':
                 if (!currentDirection.empty()) {
                     clientNetwork.sendData(currentDirection);
@@ -350,9 +465,9 @@ private:
             default: return;
         }
 
-        if (!direction.empty()) {
-            currentDirection = direction;
-            mvprintw(12, 26, "Direction entered: %s  ", currentDirection.c_str());
+        if (!command.empty()) {
+            currentDirection = command;
+            mvprintw(12, 26, "Command entered: %s  ", currentDirection.c_str());
             refresh();
         }
     }
@@ -409,15 +524,17 @@ private:
     }
 
     void resetMoveList() {
-        for (auto& [username, charInList, hasMoved] : playerMoveStatus) {
-            hasMoved = false;
+        for (auto& [username, charInList, hasMoved, isEliminated] : playerMoveStatus) {
+            if (!isEliminated) { // Only reset if not eliminated
+                hasMoved = false;
+            }
         }
         displayMoveStatus();
     }
 
     void updateMoveStatus(char playerChar) {
-        for (auto& [username, charInList, hasMoved] : playerMoveStatus) {
-            if (charInList == playerChar) {
+        for (auto& [username, charInList, hasMoved, isEliminated] : playerMoveStatus) {
+            if (charInList == playerChar && !isEliminated) {
                 hasMoved = true;
                 break;
             }
@@ -425,8 +542,42 @@ private:
         displayMoveStatus();
     }
 
+    void handleElimination(char eliminatedPlayerChar) {
+        // Remove the eliminated player from the arena
+        playerPositions.erase(eliminatedPlayerChar);
+
+        // Update the elimination status in the player move list
+        for (auto& [username, charInList, hasMoved, isEliminated] : playerMoveStatus) {
+            if (charInList == eliminatedPlayerChar) {
+                isEliminated = true;
+                break;
+            }
+        }
+
+        // Update the arena display and move list
+        drawArenaAndPlayers();
+        displayMoveStatus();
+    }
+
     void handleServerCommands() {
         while (true) {
+            if(playerPositions.size() == 1){
+                // Get the username of the remaining player
+                char lastPlayerChar = playerPositions.begin()->first;
+                for (const auto& [username, charInList, hasMoved, isEliminated] : playerMoveStatus) {
+                    if (charInList == lastPlayerChar) {
+                        displayVictoryScreen(username);
+                        break;
+                    }
+                }
+                // Close the client
+                clientNetwork.~ClientNetwork();
+                std::cout << "Client shutdown initiated." << std::endl;
+                isGameRunning = false;
+                std::this_thread::sleep_for(std::chrono::seconds(1));
+                return;
+            }
+
             std::string command = clientNetwork.tryReceiveData();
             if (!command.empty()) {
                 debugLog << "Received command: " << command << std::endl;
@@ -450,6 +601,9 @@ private:
                             updatePlayerPositions(commandData);
                             waitingForServerResponse = false;
                             break;
+                        case 'E':
+                            handleElimination(commandData[0]);
+                            break;
                         default:
                             break;
                     }
@@ -460,7 +614,6 @@ private:
     }
 
     void initializePlayerDirectionList() {
-        // Parse the initial player list and initialize the direction list
         std::istringstream initStream(playerList);
         std::string playerInfo;
         playerMoveStatus.clear();
@@ -470,13 +623,13 @@ private:
             if (commaPos != std::string::npos) {
                 std::string username = playerInfo.substr(0, commaPos);
                 char character = playerInfo[commaPos + 2];
-                playerMoveStatus.push_back(std::make_tuple(username, character, false));
+                playerMoveStatus.push_back(std::make_tuple(username, character, false, false));
             }
         }
     }
 
 public:
-    GameClient() : keepUpdatingPlayerList(true){
+    GameClient() : keepUpdatingPlayerList(true), isGameRunning(true){
         debugLog.open("debug.log.txt");
         waitingForServerResponse = false;
         keepUpdatingMoveStatus = true;
@@ -501,6 +654,32 @@ public:
         init_pair(2, COLOR_GREEN, COLOR_BLACK);
         init_pair(3, COLOR_BLUE, COLOR_BLACK);
         init_pair(4, COLOR_YELLOW, COLOR_BLACK);
+        init_pair(5, COLOR_CYAN, COLOR_BLACK); // For key mappings
+
+        // Display key mappings near the bottom left corner
+        int mappingHeight = 8; // Adjusted height of the mapping box
+        int mappingWidth = 55; // Width of the mapping box
+        int mappingStartY = LINES - mappingHeight - 2; // Adjusted position near the bottom
+        int mappingStartX = 1; // A little padding from the left edge
+
+        // Draw the top horizontal line, one character longer to the left
+        mvhline(mappingStartY - 1, mappingStartX, ACS_HLINE, mappingWidth + 1); // Horizontal line
+
+        // Draw a vertical line replacing '|' in the key mappings, extending from the top horizontal line
+        mvvline(mappingStartY, mappingStartX + 17, ACS_VLINE, mappingHeight); // Vertical line
+
+        // Draw a vertical line on the right, 1 longer on the bottom, and 2 shorter on the top
+        mvvline(mappingStartY - 1, mappingStartX + mappingWidth, ACS_VLINE, mappingHeight + 2); // Vertical line down
+
+        // Use cyan color for the key mappings
+        attron(COLOR_PAIR(5));
+        mvprintw(mappingStartY + 1, mappingStartX, "Attack keys:      ");
+        mvprintw(mappingStartY + 1, mappingStartX + 21, "Movement keys:");
+        mvprintw(mappingStartY + 3, mappingStartX, " E T Y            ");
+        mvprintw(mappingStartY + 3, mappingStartX + 21, "Up, down, left, right arrow keys");
+        mvprintw(mappingStartY + 5, mappingStartX, " F   H            ");
+        mvprintw(mappingStartY + 6, mappingStartX, " C G B            ");
+        attroff(COLOR_PAIR(5));
 
         // Draw the arena
         const int arenaHeight = 10;
@@ -595,7 +774,7 @@ public:
             if (commaPos != std::string::npos) {
                 std::string username = playerInfo.substr(0, commaPos);
                 char character = playerInfo[commaPos + 2];
-                playerMoveStatus.push_back(std::make_tuple(username, character, false));
+                playerMoveStatus.push_back(std::make_tuple(username, character, false, false));
             }
         }
 
@@ -635,10 +814,9 @@ public:
 //        drawArenaAndPlayers(playerList);
         displayMoveStatus();
 
-
         // Movement handling loop
         keypad(stdscr, TRUE); // Enable arrow keys
-        while (true) {
+        while (isGameRunning) {
             int ch = getch(); // Get user input (blocking)
             if (ch == 'q' || ch == 'Q') break; // Quit on 'q'
             handleMovement(ch);
@@ -646,6 +824,7 @@ public:
 
         // End ncurses mode
         endwin();
+        std::cout << "Exiting the game." << std::endl;
 
         // Ensure the server command thread is properly closed
         if (serverCommandThread.joinable()) {
